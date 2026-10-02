@@ -1,3 +1,11 @@
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
+
 export type UserRole = "citizen" | "driver" | "hospital" | "admin";
 
 export type RequestStatus =
@@ -24,6 +32,7 @@ export interface Profile {
   role: UserRole;
   full_name: string;
   phone: string | null;
+  avatar_url?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -35,6 +44,7 @@ export interface Hospital {
   phone: string;
   latitude: number;
   longitude: number;
+  location?: unknown;
   total_beds: number;
   available_beds: number;
   icu_available: number;
@@ -42,21 +52,25 @@ export interface Hospital {
   is_active: boolean;
   managed_by?: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface Ambulance {
   id: string;
   vehicle_number: string;
-  driver_id: string;
+  driver_id?: string | null;
   type: AmbulanceType;
   status: AmbulanceStatus;
   latitude: number;
   longitude: number;
+  location?: unknown;
   heading: number;
   speed: number;
-  last_heartbeat: string | null;
+  last_heartbeat?: string | null;
   created_at: string;
-  driver?: Profile;
+  updated_at: string;
+  // Joins
+  driver?: Profile | null;
 }
 
 export interface AiTriageResult {
@@ -75,6 +89,7 @@ export interface EmergencyRequest {
   citizen_id?: string | null;
   pickup_latitude: number;
   pickup_longitude: number;
+  pickup_location?: unknown;
   pickup_address?: string | null;
   symptoms?: string | null;
   ai_severity: TriageSeverity;
@@ -88,10 +103,10 @@ export interface EmergencyRequest {
   created_at: string;
   updated_at: string;
   // Joins
-  ambulance?: Ambulance;
-  hospital?: Hospital;
-  citizen?: Profile;
-  driver?: Profile;
+  ambulance?: Ambulance | null;
+  hospital?: Hospital | null;
+  citizen?: Profile | null;
+  driver?: Profile | null;
 }
 
 export interface TripEvent {
@@ -99,8 +114,200 @@ export interface TripEvent {
   request_id: string;
   event_type: string;
   actor_id?: string | null;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | null;
   latitude?: number | null;
   longitude?: number | null;
+  location?: unknown;
   created_at: string;
+}
+
+export interface NearestAmbulanceResult {
+  id: string;
+  vehicle_number: string;
+  driver_id: string | null;
+  type: AmbulanceType;
+  status: AmbulanceStatus;
+  latitude: number;
+  longitude: number;
+  heading: number;
+  speed: number;
+  distance_meters: number;
+}
+
+export interface Database {
+  public: {
+    Tables: {
+      profiles: {
+        Row: Profile;
+        Insert: {
+          id: string;
+          role?: UserRole;
+          full_name?: string;
+          phone?: string | null;
+          avatar_url?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          role?: UserRole;
+          full_name?: string;
+          phone?: string | null;
+          avatar_url?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      hospitals: {
+        Row: Hospital;
+        Insert: {
+          id?: string;
+          name: string;
+          address: string;
+          phone: string;
+          latitude: number;
+          longitude: number;
+          location?: unknown;
+          total_beds?: number;
+          available_beds?: number;
+          icu_available?: number;
+          specialties?: string[];
+          is_active?: boolean;
+          managed_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          address?: string;
+          phone?: string;
+          latitude?: number;
+          longitude?: number;
+          location?: unknown;
+          total_beds?: number;
+          available_beds?: number;
+          icu_available?: number;
+          specialties?: string[];
+          is_active?: boolean;
+          managed_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      ambulances: {
+        Row: Ambulance;
+        Insert: {
+          id?: string;
+          vehicle_number: string;
+          driver_id?: string | null;
+          type?: AmbulanceType;
+          status?: AmbulanceStatus;
+          latitude: number;
+          longitude: number;
+          location?: unknown;
+          heading?: number;
+          speed?: number;
+          last_heartbeat?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          vehicle_number?: string;
+          driver_id?: string | null;
+          type?: AmbulanceType;
+          status?: AmbulanceStatus;
+          latitude?: number;
+          longitude?: number;
+          location?: unknown;
+          heading?: number;
+          speed?: number;
+          last_heartbeat?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      emergency_requests: {
+        Row: EmergencyRequest;
+        Insert: {
+          id?: string;
+          citizen_id?: string | null;
+          pickup_latitude: number;
+          pickup_longitude: number;
+          pickup_location?: unknown;
+          pickup_address?: string | null;
+          symptoms?: string | null;
+          ai_severity?: TriageSeverity;
+          ai_triage_result?: AiTriageResult | null;
+          status?: RequestStatus;
+          assigned_ambulance_id?: string | null;
+          assigned_driver_id?: string | null;
+          destination_hospital_id?: string | null;
+          driver_assignment_expires_at?: string | null;
+          rejected_driver_ids?: string[];
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          citizen_id?: string | null;
+          pickup_latitude?: number;
+          pickup_longitude?: number;
+          pickup_location?: unknown;
+          pickup_address?: string | null;
+          symptoms?: string | null;
+          ai_severity?: TriageSeverity;
+          ai_triage_result?: AiTriageResult | null;
+          status?: RequestStatus;
+          assigned_ambulance_id?: string | null;
+          assigned_driver_id?: string | null;
+          destination_hospital_id?: string | null;
+          driver_assignment_expires_at?: string | null;
+          rejected_driver_ids?: string[];
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      trip_events: {
+        Row: TripEvent;
+        Insert: {
+          id?: string;
+          request_id: string;
+          event_type: string;
+          actor_id?: string | null;
+          metadata?: Record<string, unknown> | null;
+          latitude?: number | null;
+          longitude?: number | null;
+          location?: unknown;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          request_id?: string;
+          event_type?: string;
+          actor_id?: string | null;
+          metadata?: Record<string, unknown> | null;
+          latitude?: number | null;
+          longitude?: number | null;
+          location?: unknown;
+          created_at?: string;
+        };
+      };
+    };
+    Functions: {
+      find_nearest_available_ambulance: {
+        Args: {
+          lat: number;
+          lng: number;
+          radius_meters?: number;
+        };
+        Returns: NearestAmbulanceResult[];
+      };
+      current_user_role: {
+        Args: Record<PropertyKey, never>;
+        Returns: UserRole;
+      };
+    };
+  };
 }

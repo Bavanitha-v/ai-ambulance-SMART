@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowLeft, Building2, BedDouble, Stethoscope } from "lucide-react";
+import { LogoutButton } from "@/components/auth/LogoutButton";
 
 export default function HospitalPage() {
   return (
@@ -8,8 +9,11 @@ export default function HospitalPage() {
         <Link href="/" className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
           <ArrowLeft className="w-4 h-4" /> Home
         </Link>
-        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-400">
-          <Building2 className="w-4 h-4" /> Hospital ER Intake Console
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-emerald-400">
+            <Building2 className="w-4 h-4" /> Hospital ER Intake Console
+          </div>
+          <LogoutButton variant="ghost" />
         </div>
       </header>
 

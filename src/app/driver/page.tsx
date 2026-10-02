@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowLeft, Ambulance, Radio, BellRing } from "lucide-react";
+import { LogoutButton } from "@/components/auth/LogoutButton";
 
 export default function DriverPage() {
   return (
@@ -8,8 +9,11 @@ export default function DriverPage() {
         <Link href="/" className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
           <ArrowLeft className="w-4 h-4" /> Home
         </Link>
-        <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
-          <Ambulance className="w-4 h-4" /> Paramedic Driver Console
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
+            <Ambulance className="w-4 h-4" /> Paramedic Driver Console
+          </div>
+          <LogoutButton variant="ghost" />
         </div>
       </header>
 

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowLeft, ShieldCheck, Map, BarChart3, AlertOctagon } from "lucide-react";
+import { LogoutButton } from "@/components/auth/LogoutButton";
 
 export default function AdminPage() {
   return (
@@ -8,8 +9,11 @@ export default function AdminPage() {
         <Link href="/" className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
           <ArrowLeft className="w-4 h-4" /> Home
         </Link>
-        <div className="flex items-center gap-2 text-sm font-semibold text-blue-400">
-          <ShieldCheck className="w-4 h-4" /> Admin Command Center
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-blue-400">
+            <ShieldCheck className="w-4 h-4" /> Admin Command Center
+          </div>
+          <LogoutButton variant="ghost" />
         </div>
       </header>
 

@@ -57,7 +57,7 @@ export default function HomePage() {
               href="/auth/login"
               className="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg border border-slate-700/60 hover:bg-slate-800 transition"
             >
-              Sign In
+              Sign In / Register
             </Link>
             <Link
               href="/citizen"
