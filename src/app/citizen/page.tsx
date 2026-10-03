@@ -87,6 +87,7 @@ export default function CitizenPage() {
   const [cancelling, setCancelling] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [firstAidOpen, setFirstAidOpen] = useState<boolean>(false);
+  const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
 
   // Ambulance tracking & route
   const [ambulancePos, setAmbulancePos] = useState<[number, number] | null>(null);
@@ -107,6 +108,38 @@ export default function CitizenPage() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
+
+  // 1b. 30-Second Driver Assignment Timeout Countdown (Phase 5)
+  useEffect(() => {
+    if (activeRequest?.status === "driver_assigned" && activeRequest?.driver_assignment_expires_at) {
+      const updateCountdown = () => {
+        const diff = Math.max(
+          0,
+          Math.ceil((new Date(activeRequest.driver_assignment_expires_at).getTime() - Date.now()) / 1000)
+        );
+        setCountdownSeconds(diff);
+        if (diff <= 0) {
+          // Poll /api/sos which server-side auto-reassigns expired dispatch
+          fetch("/api/sos")
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.activeRequest) {
+                setActiveRequest(d.activeRequest);
+                if (d.activeRequest.ambulance) {
+                  setAmbulancePos([d.activeRequest.ambulance.latitude, d.activeRequest.ambulance.longitude]);
+                }
+              }
+            })
+            .catch(console.error);
+        }
+      };
+      updateCountdown();
+      const interval = setInterval(updateCountdown, 1000);
+      return () => clearInterval(interval);
+    } else {
+      setCountdownSeconds(null);
+    }
+  }, [activeRequest?.status, activeRequest?.driver_assignment_expires_at]);
 
   // 2. Geolocation Acquisition with Denied Fallback (Rule #7)
   const acquireLocation = useCallback(() => {
@@ -197,15 +230,24 @@ export default function CitizenPage() {
         const res = await fetch("/api/sos");
         const json = await res.json();
         if (json.activeRequest) {
-          setActiveRequest(json.activeRequest);
-          setCoords([json.activeRequest.pickup_latitude, json.activeRequest.pickup_longitude]);
-          if (json.activeRequest.ambulance) {
-            setAmbulancePos([
-              json.activeRequest.ambulance.latitude,
-              json.activeRequest.ambulance.longitude,
-            ]);
-            setAmbulanceHeading(json.activeRequest.ambulance.heading || 0);
+          if (json.activeRequest.status === "escalated" || !json.activeRequest.assigned_ambulance_id) {
+            json.activeRequest.ambulance = null;
+            setActiveRequest(json.activeRequest);
+            setAmbulancePos(null);
+            setAmbulanceHeading(0);
+            setRouteData(null);
+            setCountdownSeconds(null);
+          } else {
+            setActiveRequest(json.activeRequest);
+            if (json.activeRequest.ambulance) {
+              setAmbulancePos([
+                json.activeRequest.ambulance.latitude,
+                json.activeRequest.ambulance.longitude,
+              ]);
+              setAmbulanceHeading(json.activeRequest.ambulance.heading || 0);
+            }
           }
+          setCoords([json.activeRequest.pickup_latitude, json.activeRequest.pickup_longitude]);
         }
       } catch (err) {
         console.error("Initial load error:", err);
@@ -217,7 +259,7 @@ export default function CitizenPage() {
 
   // 5. OSRM Driving Route Calculation with Straight-Line Fallback (Rule #3)
   useEffect(() => {
-    if (!activeRequest || !ambulancePos) {
+    if (!activeRequest || !ambulancePos || activeRequest.status === "escalated") {
       setRouteData(null);
       return;
     }
@@ -262,10 +304,23 @@ export default function CitizenPage() {
         },
         async (payload) => {
           const updated = payload.new as EmergencyRequest;
+
+          if (updated.status === "escalated" || !updated.assigned_ambulance_id) {
+            setAmbulancePos(null);
+            setAmbulanceHeading(0);
+            setRouteData(null);
+            setCountdownSeconds(null);
+            setActiveRequest((prev: any) => ({ ...prev, ...updated, ambulance: null }));
+            return;
+          }
+
           setActiveRequest((prev: any) => ({ ...prev, ...updated }));
 
           // If assigned ambulance changed or status reached completion
-          if (updated.assigned_ambulance_id && !activeRequest.ambulance) {
+          if (
+            updated.assigned_ambulance_id &&
+            (!activeRequest?.ambulance || activeRequest.assigned_ambulance_id !== updated.assigned_ambulance_id)
+          ) {
             const { data: amb } = await supabase
               .from("ambulances")
               .select("id, vehicle_number, type, status, latitude, longitude, heading, speed")
@@ -275,7 +330,7 @@ export default function CitizenPage() {
             if (amb) {
               setAmbulancePos([amb.latitude, amb.longitude]);
               setAmbulanceHeading(amb.heading || 0);
-              setActiveRequest((prev: any) => ({ ...prev, ambulance: amb }));
+              setActiveRequest((prev: any) => ({ ...prev, ...updated, ambulance: amb }));
             }
           }
         }
@@ -289,7 +344,7 @@ export default function CitizenPage() {
         },
         (payload) => {
           const updatedAmb = payload.new as any;
-          if (activeRequest.assigned_ambulance_id === updatedAmb.id) {
+          if (activeRequest?.status !== "escalated" && activeRequest?.assigned_ambulance_id === updatedAmb.id) {
             setAmbulancePos([updatedAmb.latitude, updatedAmb.longitude]);
             setAmbulanceHeading(updatedAmb.heading || 0);
           }
@@ -318,10 +373,19 @@ export default function CitizenPage() {
           .single();
 
         if (refreshedReq) {
-          setActiveRequest((prev: any) => ({ ...prev, ...refreshedReq }));
-          if (refreshedReq.ambulance) {
-            setAmbulancePos([refreshedReq.ambulance.latitude, refreshedReq.ambulance.longitude]);
-            setAmbulanceHeading(refreshedReq.ambulance.heading || 0);
+          if (refreshedReq.status === "escalated" || !refreshedReq.assigned_ambulance_id) {
+            refreshedReq.ambulance = null;
+            setAmbulancePos(null);
+            setAmbulanceHeading(0);
+            setRouteData(null);
+            setCountdownSeconds(null);
+            setActiveRequest((prev: any) => ({ ...prev, ...refreshedReq, ambulance: null }));
+          } else {
+            setActiveRequest((prev: any) => ({ ...prev, ...refreshedReq }));
+            if (refreshedReq.ambulance) {
+              setAmbulancePos([refreshedReq.ambulance.latitude, refreshedReq.ambulance.longitude]);
+              setAmbulanceHeading(refreshedReq.ambulance.heading || 0);
+            }
           }
         }
       } catch (err) {
@@ -333,7 +397,20 @@ export default function CitizenPage() {
       supabase.removeChannel(channel);
       clearInterval(pollInterval);
     };
-  }, [activeRequest?.id, activeRequest?.assigned_ambulance_id]);
+  }, [activeRequest?.id, activeRequest?.assigned_ambulance_id, activeRequest?.status]);
+
+  // 6b. Explicit Safeguard: Whenever activeRequest becomes 'escalated', immediately purge stale ambulance & route
+  useEffect(() => {
+    if (activeRequest?.status === "escalated") {
+      setAmbulancePos(null);
+      setAmbulanceHeading(0);
+      setRouteData(null);
+      setCountdownSeconds(null);
+      if (activeRequest.ambulance) {
+        setActiveRequest((prev: any) => (prev ? { ...prev, ambulance: null } : null));
+      }
+    }
+  }, [activeRequest?.status]);
 
   // 7. Handle 1-Tap SOS Submission with Rate Limiting (Rule #5)
   async function handleDispatchSOS() {
@@ -362,11 +439,20 @@ export default function CitizenPage() {
         throw new Error(data.error || "Failed to dispatch SOS. Please try again.");
       }
 
-      setActiveRequest(data.request);
-      if (data.ambulance) {
-        setAmbulancePos([data.ambulance.latitude, data.ambulance.longitude]);
-        setAmbulanceHeading(data.ambulance.heading || 0);
-        setActiveRequest((prev: any) => ({ ...prev, ambulance: data.ambulance }));
+      if (data.request?.status === "escalated" || !data.request?.assigned_ambulance_id) {
+        if (data.request) data.request.ambulance = null;
+        setActiveRequest(data.request);
+        setAmbulancePos(null);
+        setAmbulanceHeading(0);
+        setRouteData(null);
+        setCountdownSeconds(null);
+      } else {
+        setActiveRequest(data.request);
+        if (data.ambulance) {
+          setAmbulancePos([data.ambulance.latitude, data.ambulance.longitude]);
+          setAmbulanceHeading(data.ambulance.heading || 0);
+          setActiveRequest((prev: any) => ({ ...prev, ambulance: data.ambulance }));
+        }
       }
     } catch (err: any) {
       console.error("SOS Dispatch error:", err);
@@ -523,10 +609,10 @@ export default function CitizenPage() {
               center={coords}
               zoom={13}
               patientLocation={coords}
-              ambulanceLocation={ambulancePos}
-              ambulanceHeading={ambulanceHeading}
+              ambulanceLocation={activeRequest?.status === "escalated" ? null : ambulancePos}
+              ambulanceHeading={activeRequest?.status === "escalated" ? 0 : ambulanceHeading}
               hospitals={hospitals}
-              routeCoordinates={routeData?.coordinates || []}
+              routeCoordinates={activeRequest?.status === "escalated" ? [] : (routeData?.coordinates || [])}
               isSelectingLocation={isSelectingOnMap}
               onLocationSelect={(lat, lng) => {
                 setCoords([lat, lng]);
@@ -536,8 +622,8 @@ export default function CitizenPage() {
             />
           </div>
 
-          {/* Live ETA Card (Rule #3) */}
-          {activeRequest && (
+          {/* Live ETA Card (Rule #3) - Hidden when escalated */}
+          {activeRequest && activeRequest.status !== "escalated" && (
             <div className="bg-gradient-to-r from-slate-900 to-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-5 flex items-center justify-between shadow-xl">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
@@ -706,13 +792,17 @@ export default function CitizenPage() {
             /* STATE B: Active Dispatch Tracking Screen */
             <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-2xl space-y-6">
               {/* Header */}
+              {/* Header */}
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-[11px] uppercase tracking-wider text-red-400 font-bold">
-                    Active Emergency Case #{activeRequest.id.substring(0, 8)}
+                  <span className="text-[11px] uppercase tracking-wider text-red-400 font-bold flex items-center gap-1.5">
+                    {activeRequest.status === "escalated" && <AlertTriangle className="w-3.5 h-3.5 animate-pulse text-red-400" />}
+                    <span>
+                      Case #{activeRequest.id.substring(0, 8)} • {activeRequest.status === "escalated" ? "Escalated to Control Room" : "Active Dispatch"}
+                    </span>
                   </span>
                   <h2 className="text-xl font-black text-white tracking-tight mt-0.5">
-                    Ambulance Dispatch Active
+                    {activeRequest.status === "escalated" ? "Central Command Escalation" : "Ambulance Dispatch Active"}
                   </h2>
                 </div>
                 <a
@@ -724,80 +814,140 @@ export default function CitizenPage() {
                 </a>
               </div>
 
-              {/* Assigned Vehicle Card */}
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
-                      <Ambulance className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-bold text-white">
-                        {activeRequest.ambulance?.vehicle_number || "TN-01-EM-1081"}
-                      </div>
-                      <div className="text-[11px] text-amber-400 font-medium uppercase tracking-wider">
-                        {activeRequest.ambulance?.type || "ALS (Advanced Life Support)"}
-                      </div>
-                    </div>
+              {/* Escalation Alert OR Assigned Vehicle Card */}
+              {activeRequest.status === "escalated" ? (
+                <div className="p-5 rounded-2xl bg-gradient-to-b from-red-950/70 to-slate-900 border border-red-500/50 space-y-4 shadow-2xl shadow-red-950/40">
+                  <div className="flex items-center gap-2 text-red-400 font-bold text-sm">
+                    <AlertTriangle className="w-5 h-5 text-red-400 animate-pulse shrink-0" />
+                    <span>Central Command Escalation Active</span>
                   </div>
-                  <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-300 text-xs font-semibold border border-amber-500/30">
-                    Paramedic Unit
-                  </span>
-                </div>
 
-                {activeRequest.ambulance?.driver && (
-                  <div className="pt-2 border-t border-slate-900 text-xs flex items-center justify-between text-slate-400">
-                    <span>Paramedic: {activeRequest.ambulance.driver.full_name || "Emergency Crew"}</span>
-                    {activeRequest.ambulance.driver.phone && (
-                      <a
-                        href={`tel:${activeRequest.ambulance.driver.phone}`}
-                        className="text-red-400 hover:underline"
-                      >
-                        {activeRequest.ambulance.driver.phone}
-                      </a>
+                  <p className="text-xs text-red-200/90 leading-relaxed">
+                    All candidate emergency units in your vicinity are currently committed or busy. Your request has been automatically escalated to the Chennai 108 Central Command Center with maximum SLA priority. A dispatcher is manually overriding fleet allocation.
+                  </p>
+
+                  <div className="p-3.5 rounded-xl bg-slate-950/80 border border-red-900/40 text-xs text-slate-300 space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-amber-400 font-semibold">
+                      <MapPin className="w-3.5 h-3.5" />
+                      <span>Patient GPS Pin Logged</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Coordinates: ({coords[0].toFixed(4)}, {coords[1].toFixed(4)})
+                    </p>
+                    {activeRequest.pickup_address && (
+                      <p className="text-[11px] text-slate-400">Address: {activeRequest.pickup_address}</p>
                     )}
+                    <p className="text-[10px] text-amber-400/80 pt-1 italic">
+                      Ambulance tracking and ETA paused until a unit is manually dispatched by the control center.
+                    </p>
                   </div>
-                )}
-              </div>
 
-              {/* Status Pipeline Stepper (Rule #1) */}
-              <div className="space-y-3">
-                <div className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                  Dispatch Lifecycle Status
+                  <div className="pt-1">
+                    <a
+                      href="tel:108"
+                      className="w-full py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-sm flex items-center justify-center gap-2 transition shadow-xl shadow-red-600/30"
+                    >
+                      <PhoneCall className="w-4 h-4" /> Call 108 Emergency Control Directly
+                    </a>
+                  </div>
                 </div>
-                <div className="space-y-3 relative before:absolute before:left-3.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
-                  {STATUS_STEPS.map((step, idx) => {
-                    const isDone = currentStepIndex > idx;
-                    const isCurrent = currentStepIndex === idx;
-
-                    return (
-                      <div key={step.key} className="flex items-start gap-3 relative z-10">
-                        <div
-                          className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-bold transition ${
-                            isDone
-                              ? "bg-emerald-600 text-white"
-                              : isCurrent
-                              ? "bg-amber-500 text-slate-950 ring-4 ring-amber-500/20 animate-pulse"
-                              : "bg-slate-800 text-slate-500"
-                          }`}
-                        >
-                          {isDone ? <CheckCircle2 className="w-4 h-4" /> : idx + 1}
+              ) : (
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
+                        <Ambulance className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-bold text-white">
+                          {activeRequest.ambulance?.vehicle_number || "TN-01-EM-1081"}
                         </div>
-                        <div className="flex-1">
+                        <div className="text-[11px] text-amber-400 font-medium uppercase tracking-wider">
+                          {activeRequest.ambulance?.type || "ALS (Advanced Life Support)"}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-300 text-xs font-semibold border border-amber-500/30">
+                      Paramedic Unit
+                    </span>
+                  </div>
+
+                  {activeRequest.ambulance?.driver && (
+                    <div className="pt-2 border-t border-slate-900 text-xs flex items-center justify-between text-slate-400">
+                      <span>Paramedic: {activeRequest.ambulance.driver.full_name || "Emergency Crew"}</span>
+                      {activeRequest.ambulance.driver.phone && (
+                        <a
+                          href={`tel:${activeRequest.ambulance.driver.phone}`}
+                          className="text-red-400 hover:underline"
+                        >
+                          {activeRequest.ambulance.driver.phone}
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 30-Sec Driver Assignment Countdown Badge (Phase 5) */}
+                  {activeRequest.status === "driver_assigned" && countdownSeconds !== null && (
+                    <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs">
+                      <span className="text-amber-300 font-medium flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 animate-spin" /> Paramedic confirmation timer:
+                      </span>
+                      <span className="font-mono font-bold text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded">
+                        {countdownSeconds}s
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Reassignment indicator if previous units rejected/timed out */}
+                  {Array.isArray(activeRequest.rejected_ambulance_ids) &&
+                    activeRequest.rejected_ambulance_ids.length > 0 && (
+                      <div className="text-[11px] text-slate-400 italic pt-1">
+                        ⚡ Auto-reassigned from {activeRequest.rejected_ambulance_ids.length} previous candidate unit(s).
+                      </div>
+                    )}
+                </div>
+              )}
+
+              {/* Status Pipeline Stepper (Rule #1) - Hidden when escalated */}
+              {activeRequest.status !== "escalated" && (
+                <div className="space-y-3">
+                  <div className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Dispatch Lifecycle Status
+                  </div>
+                  <div className="space-y-3 relative before:absolute before:left-3.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
+                    {STATUS_STEPS.map((step, idx) => {
+                      const isDone = currentStepIndex > idx;
+                      const isCurrent = currentStepIndex === idx;
+
+                      return (
+                        <div key={step.key} className="flex items-start gap-3 relative z-10">
                           <div
-                            className={`text-xs font-bold ${
-                              isCurrent ? "text-amber-400" : isDone ? "text-white" : "text-slate-500"
+                            className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-bold transition ${
+                              isDone
+                                ? "bg-emerald-600 text-white"
+                                : isCurrent
+                                ? "bg-amber-500 text-slate-950 ring-4 ring-amber-500/20 animate-pulse"
+                                : "bg-slate-800 text-slate-500"
                             }`}
                           >
-                            {step.label}
+                            {isDone ? <CheckCircle2 className="w-4 h-4" /> : idx + 1}
                           </div>
-                          <div className="text-[11px] text-slate-400">{step.desc}</div>
+                          <div className="flex-1">
+                            <div
+                              className={`text-xs font-bold ${
+                                isCurrent ? "text-amber-400" : isDone ? "text-white" : "text-slate-500"
+                              }`}
+                            >
+                              {step.label}
+                            </div>
+                            <div className="text-[11px] text-slate-400">{step.desc}</div>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Action Buttons */}
               <div className="pt-2 flex items-center gap-3">

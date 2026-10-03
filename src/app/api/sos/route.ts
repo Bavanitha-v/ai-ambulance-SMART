@@ -1,4 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  dispatchEmergencyRequest,
+  handleDispatchTimeout,
+} from "@/lib/dispatch/serverDispatch";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import type { TriageSeverity } from "@/types/database.types";
@@ -13,6 +18,7 @@ const SosRequestSchema = z.object({
 });
 
 // GET /api/sos - Retrieve active emergency request for the current citizen
+// Auto-checks for 30s driver assignment timeout and reassigns if expired
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient();
@@ -24,7 +30,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ activeRequest: null }, { status: 200 });
     }
 
-    const { data: activeRequest, error } = await supabase
+    const admin = createAdminClient();
+
+    let { data: activeRequest, error } = await admin
       .from("emergency_requests")
       .select(`
         *,
@@ -64,13 +72,61 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    // Auto-detect 30-sec driver assignment timeout and trigger server-side next-nearest reassignment
+    if (
+      activeRequest &&
+      activeRequest.status === "driver_assigned" &&
+      activeRequest.driver_assignment_expires_at &&
+      new Date(activeRequest.driver_assignment_expires_at) <= new Date()
+    ) {
+      console.log(`[SOS GET] Assignment expired for request ${activeRequest.id}. Reassigning...`);
+      await handleDispatchTimeout(activeRequest.id);
+
+      // Re-fetch updated request
+      const { data: refreshedRequest } = await admin
+        .from("emergency_requests")
+        .select(`
+          *,
+          ambulance:assigned_ambulance_id (
+            id,
+            vehicle_number,
+            type,
+            status,
+            latitude,
+            longitude,
+            heading,
+            speed,
+            driver:driver_id (
+              id,
+              full_name,
+              phone
+            )
+          ),
+          hospital:destination_hospital_id (
+            id,
+            name,
+            address,
+            phone,
+            latitude,
+            longitude,
+            available_beds
+          )
+        `)
+        .eq("id", activeRequest.id)
+        .single();
+
+      if (refreshedRequest) {
+        activeRequest = refreshedRequest;
+      }
+    }
+
     return NextResponse.json({ activeRequest });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || "Server error" }, { status: 500 });
   }
 }
 
-// POST /api/sos - Create new Emergency Request with strict 3 per 10min rate limiting
+// POST /api/sos - Create new Emergency Request with strict 3 per 10min rate limiting & Server-Side Dispatch
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createClient();
@@ -96,11 +152,12 @@ export async function POST(request: NextRequest) {
     }
 
     const { latitude, longitude, address, symptoms, category, severity } = parsed.data;
+    const admin = createAdminClient();
 
     // RULE #5: Rate Limit SOS Creation (max 3 per 10 minutes per user)
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
-    const { count, error: countError } = await supabase
+    const { count, error: countError } = await admin
       .from("emergency_requests")
       .select("id", { count: "exact", head: true })
       .eq("citizen_id", user.id)
@@ -119,12 +176,14 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 1: Create Emergency Request with initial status 'searching_driver'
-    const { data: newRequest, error: insertError } = await supabase
+    const pointWkt = `POINT(${longitude} ${latitude})`;
+    const { data: newRequest, error: insertError } = await admin
       .from("emergency_requests")
       .insert({
         citizen_id: user.id,
         pickup_latitude: latitude,
         pickup_longitude: longitude,
+        pickup_location: pointWkt,
         pickup_address: address || "GPS Pin Location",
         symptoms: symptoms ? `[${category.toUpperCase()}] ${symptoms}` : `[${category.toUpperCase()}] Emergency SOS`,
         ai_severity: severity as TriageSeverity,
@@ -141,43 +200,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Step 2: Auto-match with nearest available ambulance via PostGIS RPC
-    let assignedAmbulance: any = null;
-    try {
-      const { data: nearestList, error: rpcError } = await supabase.rpc(
-        "find_nearest_available_ambulance",
-        {
-          lat: latitude,
-          lng: longitude,
-          radius_meters: 50000, // 50km radius
-        }
-      );
-
-      if (!rpcError && nearestList && nearestList.length > 0) {
-        assignedAmbulance = nearestList[0];
-
-        // Update request to 'driver_assigned' and set expiry
-        const expiresAt = new Date(Date.now() + 45 * 1000).toISOString();
-
-        await supabase
-          .from("emergency_requests")
-          .update({
-            assigned_ambulance_id: assignedAmbulance.id,
-            assigned_driver_id: assignedAmbulance.driver_id,
-            status: "driver_assigned",
-            driver_assignment_expires_at: expiresAt,
-          })
-          .eq("id", newRequest.id);
-
-        newRequest.assigned_ambulance_id = assignedAmbulance.id;
-        newRequest.status = "driver_assigned";
-      }
-    } catch (rpcErr) {
-      console.warn("Nearest ambulance lookup warning:", rpcErr);
-    }
-
-    // Step 3: Log audit event to trip_events
-    await supabase.from("trip_events").insert({
+    // Step 2: Audit log SOS creation
+    await admin.from("trip_events").insert({
       request_id: newRequest.id,
       event_type: "sos_created",
       actor_id: user.id,
@@ -185,15 +209,42 @@ export async function POST(request: NextRequest) {
       longitude,
       metadata: {
         category,
-        assigned_ambulance_id: assignedAmbulance?.id || null,
-        assigned_vehicle: assignedAmbulance?.vehicle_number || null,
-        distance_meters: assignedAmbulance?.distance_meters || null,
+        severity,
+        address,
       },
     });
 
+    // Step 3: Trigger Server-Side Dispatch Engine (PostGIS nearest + row locking + 30s timeout)
+    const dispatchResult = await dispatchEmergencyRequest(newRequest.id, user.id);
+
+    // Step 4: Fetch populated request
+    const { data: finalizedRequest } = await admin
+      .from("emergency_requests")
+      .select(`
+        *,
+        ambulance:assigned_ambulance_id (
+          id,
+          vehicle_number,
+          type,
+          status,
+          latitude,
+          longitude,
+          heading,
+          speed,
+          driver:driver_id (
+            id,
+            full_name,
+            phone
+          )
+        )
+      `)
+      .eq("id", newRequest.id)
+      .single();
+
     return NextResponse.json({
-      request: newRequest,
-      ambulance: assignedAmbulance,
+      request: finalizedRequest || newRequest,
+      ambulance: dispatchResult.ambulance || null,
+      dispatch: dispatchResult,
     });
   } catch (err: any) {
     console.error("Unhandled SOS API error:", err);
@@ -201,7 +252,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PATCH /api/sos - Cancel emergency request
+// PATCH /api/sos - Cancel emergency request & release assigned ambulance
 export async function PATCH(request: NextRequest) {
   try {
     const supabase = await createClient();
@@ -219,14 +270,35 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Missing requestId" }, { status: 400 });
     }
 
-    const { data: updated, error } = await supabase
+    const admin = createAdminClient();
+
+    // Fetch existing request to inspect assigned ambulance
+    const { data: existing } = await admin
+      .from("emergency_requests")
+      .select("id, citizen_id, assigned_ambulance_id")
+      .eq("id", requestId)
+      .single();
+
+    if (!existing || existing.citizen_id !== user.id) {
+      return NextResponse.json({ error: "Request not found or access denied" }, { status: 404 });
+    }
+
+    // Release assigned ambulance if any
+    if (existing.assigned_ambulance_id) {
+      await admin
+        .from("ambulances")
+        .update({ status: "available", updated_at: new Date().toISOString() })
+        .eq("id", existing.assigned_ambulance_id);
+    }
+
+    const { data: updated, error } = await admin
       .from("emergency_requests")
       .update({
         status: "cancelled",
+        driver_assignment_expires_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", requestId)
-      .eq("citizen_id", user.id)
       .select()
       .single();
 
@@ -235,7 +307,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     // Log trip event
-    await supabase.from("trip_events").insert({
+    await admin.from("trip_events").insert({
       request_id: requestId,
       event_type: "sos_cancelled",
       actor_id: user.id,

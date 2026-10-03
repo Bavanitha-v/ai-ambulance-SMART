@@ -100,6 +100,7 @@ export interface EmergencyRequest {
   destination_hospital_id?: string | null;
   driver_assignment_expires_at?: string | null;
   rejected_driver_ids?: string[];
+  rejected_ambulance_ids?: string[];
   created_at: string;
   updated_at: string;
   // Joins
@@ -107,6 +108,18 @@ export interface EmergencyRequest {
   hospital?: Hospital | null;
   citizen?: Profile | null;
   driver?: Profile | null;
+}
+
+export interface AdminNotification {
+  id: string;
+  request_id?: string | null;
+  type: string;
+  title: string;
+  message: string;
+  severity: "critical" | "high" | "medium" | "low";
+  is_read: boolean;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface TripEvent {
@@ -246,6 +259,7 @@ export interface Database {
           destination_hospital_id?: string | null;
           driver_assignment_expires_at?: string | null;
           rejected_driver_ids?: string[];
+          rejected_ambulance_ids?: string[];
           created_at?: string;
           updated_at?: string;
         };
@@ -265,8 +279,34 @@ export interface Database {
           destination_hospital_id?: string | null;
           driver_assignment_expires_at?: string | null;
           rejected_driver_ids?: string[];
+          rejected_ambulance_ids?: string[];
           created_at?: string;
           updated_at?: string;
+        };
+      };
+      admin_notifications: {
+        Row: AdminNotification;
+        Insert: {
+          id?: string;
+          request_id?: string | null;
+          type?: string;
+          title: string;
+          message: string;
+          severity?: "critical" | "high" | "medium" | "low";
+          is_read?: boolean;
+          metadata?: Record<string, unknown> | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          request_id?: string | null;
+          type?: string;
+          title?: string;
+          message?: string;
+          severity?: "critical" | "high" | "medium" | "low";
+          is_read?: boolean;
+          metadata?: Record<string, unknown> | null;
+          created_at?: string;
         };
       };
       trip_events: {
@@ -301,8 +341,34 @@ export interface Database {
           lat: number;
           lng: number;
           radius_meters?: number;
+          exclude_ambulance_ids?: string[];
         };
         Returns: NearestAmbulanceResult[];
+      };
+      dispatch_emergency_request: {
+        Args: {
+          p_request_id: string;
+          p_actor_id?: string | null;
+        };
+        Returns: Record<string, unknown>;
+      };
+      reject_and_reassign_ambulance: {
+        Args: {
+          p_request_id: string;
+          p_reason?: string;
+          p_actor_id?: string | null;
+        };
+        Returns: Record<string, unknown>;
+      };
+      handle_dispatch_timeout: {
+        Args: {
+          p_request_id: string;
+        };
+        Returns: Record<string, unknown>;
+      };
+      process_expired_dispatches: {
+        Args: Record<PropertyKey, never>;
+        Returns: Record<string, unknown>;
       };
       current_user_role: {
         Args: Record<PropertyKey, never>;
