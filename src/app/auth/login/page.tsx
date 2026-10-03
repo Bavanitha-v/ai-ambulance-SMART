@@ -123,45 +123,50 @@ function AuthForm() {
 
     try {
       setLoading(true);
-      const supabase = createClient();
 
-      // Sign up with user metadata
-      const { data, error } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-        options: {
-          data: {
-            full_name: fullName.trim(),
-            phone: phone.trim() || null,
-            role: role,
-          },
-        },
+      // Call server signup endpoint (which auto-verifies email and bypasses rate limits)
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+          fullName: fullName.trim(),
+          phone: phone.trim() || null,
+          role,
+        }),
       });
 
-      if (error) {
-        throw error;
+      const resJson = await res.json();
+
+      if (!res.ok) {
+        throw new Error(resJson.error || "Failed to create account");
       }
 
-      // Check if session was returned immediately (Confirm Email disabled)
-      if (data.session && data.user) {
-        setSuccessMessage("Account created successfully! Redirecting to your dashboard...");
-        setTimeout(() => {
-          if (redirectTarget && redirectTarget.startsWith("/")) {
-            router.push(redirectTarget);
-          } else {
-            router.push(`/${role}`);
-          }
-          router.refresh();
-        }, 800);
-      } else {
-        // Email confirmation is required by Supabase settings
-        setSuccessMessage(
-          `Account created for ${email}! Please check your email for the confirmation link. (Note: You can disable 'Confirm email' in your Supabase Auth dashboard for instant login).`
-        );
+      setSuccessMessage("Account created successfully! Logging you in...");
+
+      // Automatically sign in with the newly created account
+      const supabase = createClient();
+      const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+
+      if (loginError) {
+        throw loginError;
       }
+
+      setTimeout(() => {
+        if (redirectTarget && redirectTarget.startsWith("/")) {
+          router.push(redirectTarget);
+        } else {
+          router.push(`/${role}`);
+        }
+        router.refresh();
+      }, 600);
     } catch (err: any) {
       console.error("Signup error:", err);
-      if (err.message?.includes("User already registered")) {
+      if (err.message?.includes("already exists") || err.message?.includes("already been registered")) {
         setErrorMessage("An account with this email address already exists. Please switch to Sign In.");
       } else {
         setErrorMessage(err.message || "Failed to create account. Please check your details.");
