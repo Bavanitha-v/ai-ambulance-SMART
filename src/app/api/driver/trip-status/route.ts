@@ -1,9 +1,16 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getDriverSession, verifyDriverRequestAccess } from "@/lib/auth/driverAuth";
 import { NextResponse, type NextRequest } from "next/server";
 
 // POST /api/driver/trip-status - Transition emergency trip milestones
 export async function POST(request: NextRequest) {
   try {
+    // 1. Verify driver authentication
+    const auth = await getDriverSession(request);
+    if (auth.error || !auth.user) {
+      return NextResponse.json({ error: auth.error }, { status: auth.status || 401 });
+    }
+
     const { requestId, action, hospitalId } = await request.json();
 
     if (!requestId || !["picked_up", "reached_hospital", "completed"].includes(action)) {
@@ -13,18 +20,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const admin = createAdminClient();
-
-    // Fetch active request
-    const { data: currentReq, error: fetchErr } = await admin
-      .from("emergency_requests")
-      .select("*, ambulance:assigned_ambulance_id (*)")
-      .eq("id", requestId)
-      .single();
-
-    if (fetchErr || !currentReq) {
-      return NextResponse.json({ error: "Emergency request not found" }, { status: 404 });
+    // 2. CRITICAL REQUIREMENT: Verify driver is assigned to this request
+    const reqAuth = await verifyDriverRequestAccess(auth.user, auth.isAdmin, requestId);
+    if (!reqAuth.authorized || !reqAuth.request) {
+      return NextResponse.json({ error: reqAuth.error }, { status: reqAuth.status || 403 });
     }
+
+    const currentReq = reqAuth.request;
+    const admin = createAdminClient();
 
     let nextStatus: string = currentReq.status;
     let eventType: string = "";
@@ -93,12 +96,14 @@ export async function POST(request: NextRequest) {
     await admin.from("trip_events").insert({
       request_id: requestId,
       event_type: eventType,
+      actor_id: auth.user.id,
       latitude: currentReq.ambulance?.latitude || currentReq.pickup_latitude,
       longitude: currentReq.ambulance?.longitude || currentReq.pickup_longitude,
       metadata: {
         action,
         previous_status: currentReq.status,
         new_status: nextStatus,
+        driver_id: auth.user.id,
         destination_hospital_id: destinationHospitalId,
         timestamp: new Date().toISOString(),
       },
@@ -106,6 +111,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, request: updatedReq });
   } catch (err: any) {
+    console.error("[API /api/driver/trip-status] Error:", err);
     return NextResponse.json({ error: err.message || "Internal server error" }, { status: 500 });
   }
 }

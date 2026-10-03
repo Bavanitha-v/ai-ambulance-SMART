@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { getDriverSession, verifyDriverRequestAccess } from "@/lib/auth/driverAuth";
 import {
   rejectAndReassignAmbulance,
   handleDispatchTimeout,
@@ -8,11 +8,6 @@ import { NextResponse, type NextRequest } from "next/server";
 // POST /api/dispatch/reassign - Server-side driver rejection or timeout reassignment
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
     const body = await request.json();
     const { requestId, reason, action = "reject" } = body;
 
@@ -24,10 +19,22 @@ export async function POST(request: NextRequest) {
       const result = await handleDispatchTimeout(requestId);
       return NextResponse.json(result);
     } else {
+      // 1. Verify driver authentication
+      const auth = await getDriverSession(request);
+      if (auth.error || !auth.user) {
+        return NextResponse.json({ error: auth.error }, { status: auth.status || 401 });
+      }
+
+      // 2. CRITICAL REQUIREMENT: Verify driver identity matches assigned request
+      const reqAuth = await verifyDriverRequestAccess(auth.user, auth.isAdmin, requestId);
+      if (!reqAuth.authorized || !reqAuth.request) {
+        return NextResponse.json({ error: reqAuth.error }, { status: reqAuth.status || 403 });
+      }
+
       const result = await rejectAndReassignAmbulance(
         requestId,
         reason || "Driver rejected emergency dispatch",
-        user?.id || null
+        auth.user.id
       );
       return NextResponse.json(result);
     }

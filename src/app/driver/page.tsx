@@ -23,6 +23,8 @@ import {
   TrendingUp,
   Volume2,
   VolumeX,
+  UserCheck,
+  ShieldCheck,
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
 import { createClient } from "@/lib/supabase/client";
@@ -61,6 +63,14 @@ function playEmergencyChime() {
 }
 
 export default function DriverDashboardPage() {
+  // Driver Identity State
+  const [driverUser, setDriverUser] = useState<{
+    id: string;
+    email?: string;
+    full_name?: string;
+    role?: string;
+  } | null>(null);
+
   // Fleet & Selected Vehicle State
   const [ambulances, setAmbulances] = useState<AmbulanceType[]>([]);
   const [selectedAmbulanceId, setSelectedAmbulanceId] = useState<string>("");
@@ -101,13 +111,24 @@ export default function DriverDashboardPage() {
         createClient().from("hospitals").select("*").eq("is_active", true),
       ]);
 
+      if (resVehicles.status === 401) {
+        window.location.href = "/auth/login?redirect=/driver";
+        return;
+      }
+
       const data = await resVehicles.json();
       if (resVehicles.ok && Array.isArray(data.ambulances)) {
+        if (data.user) {
+          setDriverUser(data.user);
+        }
+
         setAmbulances(data.ambulances);
 
-        // Pick initial ambulance (default to TN-01-EM-1084 or first available)
+        // Pick ambulance: prefer one already assigned to this driver, or stored ID, or TN-01-EM-1084
+        const userAssigned = data.ambulances.find((a: AmbulanceType) => a.driver_id === data.user?.id);
         const storedId = localStorage.getItem("selected_driver_ambulance");
         const match =
+          userAssigned ||
           data.ambulances.find((a: AmbulanceType) => a.id === storedId) ||
           data.ambulances.find((a: AmbulanceType) => a.vehicle_number === "TN-01-EM-1084") ||
           data.ambulances[0];
@@ -119,9 +140,11 @@ export default function DriverDashboardPage() {
           setDriverPos([match.latitude, match.longitude]);
           setDriverHeading(match.heading || 0);
 
-          // Check if this vehicle has an active emergency request
+          // Check if this vehicle has an active emergency request assigned to this driver
           const linkedRequest = data.activeRequests?.find(
-            (r: any) => r.assigned_ambulance_id === match.id
+            (r: any) =>
+              r.assigned_ambulance_id === match.id ||
+              (data.user && r.assigned_driver_id === data.user.id)
           );
           setActiveRequest(linkedRequest || null);
         }
@@ -168,8 +191,14 @@ export default function DriverDashboardPage() {
     fetch("/api/driver/vehicle")
       .then((r) => r.json())
       .then((d) => {
-        const linked = d.activeRequests?.find((r: any) => r.assigned_ambulance_id === ambId);
-        setActiveRequest(linked || null);
+        if (d.activeRequests) {
+          const linked = d.activeRequests.find(
+            (r: any) =>
+              r.assigned_ambulance_id === ambId ||
+              (driverUser && r.assigned_driver_id === driverUser.id)
+          );
+          setActiveRequest(linked || null);
+        }
       });
   };
 
@@ -297,7 +326,10 @@ export default function DriverDashboardPage() {
         },
         (payload) => {
           const req = payload.new as any;
-          if (req.assigned_ambulance_id === selectedAmbulanceId) {
+          if (
+            req.assigned_ambulance_id === selectedAmbulanceId &&
+            (!req.assigned_driver_id || !driverUser || req.assigned_driver_id === driverUser.id)
+          ) {
             setActiveRequest(req);
             if (soundEnabled) playEmergencyChime();
           }
@@ -313,11 +345,14 @@ export default function DriverDashboardPage() {
         (payload) => {
           const req = payload.new as any;
           if (req.assigned_ambulance_id === selectedAmbulanceId) {
-            if (req.status === "cancelled" || req.status === "completed") {
-              setActiveRequest(null);
-            } else {
-              setActiveRequest((prev: any) => ({ ...prev, ...req }));
-              if (req.status === "driver_assigned" && soundEnabled) playEmergencyChime();
+            // Verify assigned to this driver or vehicle
+            if (!req.assigned_driver_id || !driverUser || req.assigned_driver_id === driverUser.id || driverUser.role === "admin") {
+              if (req.status === "cancelled" || req.status === "completed") {
+                setActiveRequest(null);
+              } else {
+                setActiveRequest((prev: any) => ({ ...prev, ...req }));
+                if (req.status === "driver_assigned" && soundEnabled) playEmergencyChime();
+              }
             }
           } else if (activeRequest?.id === req.id && req.assigned_ambulance_id !== selectedAmbulanceId) {
             // Reassigned to another vehicle
@@ -337,12 +372,16 @@ export default function DriverDashboardPage() {
     const pollInterval = setInterval(async () => {
       try {
         const res = await fetch("/api/driver/vehicle");
-        const data = await res.json();
-        if (res.ok && data.activeRequests) {
-          const matched = data.activeRequests.find(
-            (r: any) => r.assigned_ambulance_id === selectedAmbulanceId
-          );
-          setActiveRequest(matched || null);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.activeRequests) {
+            const matched = data.activeRequests.find(
+              (r: any) =>
+                r.assigned_ambulance_id === selectedAmbulanceId ||
+                (driverUser && r.assigned_driver_id === driverUser.id)
+            );
+            setActiveRequest(matched || null);
+          }
         }
       } catch (e) {
         console.warn("[Driver Poll] Error:", e);
@@ -353,7 +392,7 @@ export default function DriverDashboardPage() {
       supabase.removeChannel(channel);
       clearInterval(pollInterval);
     };
-  }, [selectedAmbulanceId, activeRequest?.id, soundEnabled]);
+  }, [selectedAmbulanceId, activeRequest?.id, soundEnabled, driverUser]);
 
   // 7. 30-Second Driver Confirmation Countdown Timer
   useEffect(() => {
@@ -454,7 +493,7 @@ export default function DriverDashboardPage() {
 
       setActiveRequest(data.request);
       setMessage({
-        text: "Dispatch Accepted! Navigate to the patient pickup location.",
+        text: "Emergency dispatch confirmed! Turn-by-turn navigation active.",
         type: "success",
       });
     } catch (err: any) {
@@ -621,8 +660,21 @@ export default function DriverDashboardPage() {
           </div>
         </div>
 
-        {/* Right Action Controls: Vehicle Selector & Online Hero Toggle */}
+        {/* Right Action Controls: Driver Badge, Vehicle Selector & Online Hero Toggle */}
         <div className="flex items-center gap-2">
+          {/* Driver identity indicator */}
+          {driverUser && (
+            <div className="hidden md:flex flex-col text-right pr-2 border-r border-slate-800">
+              <span className="text-[11px] font-bold text-white flex items-center justify-end gap-1">
+                <UserCheck className="w-3 h-3 text-emerald-400" />
+                {driverUser.full_name || driverUser.email?.split("@")[0]}
+              </span>
+              <span className="text-[9px] text-amber-400 font-mono uppercase tracking-wider">
+                {driverUser.role === "admin" ? "CENTRAL ADMIN" : "PARAMEDIC"}
+              </span>
+            </div>
+          )}
+
           {/* Audio Chime Mute Toggle */}
           <button
             onClick={() => setSoundEnabled(!soundEnabled)}
@@ -639,11 +691,19 @@ export default function DriverDashboardPage() {
             disabled={Boolean(isOnActiveTrip)}
             className="bg-slate-800 border border-slate-700 text-white text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500 transition disabled:opacity-50"
           >
-            {ambulances.map((amb) => (
-              <option key={amb.id} value={amb.id}>
-                {amb.vehicle_number} ({amb.type.toUpperCase()})
-              </option>
-            ))}
+            {ambulances.map((amb) => {
+              const isOtherDriver = amb.driver_id && driverUser && amb.driver_id !== driverUser.id;
+              return (
+                <option
+                  key={amb.id}
+                  value={amb.id}
+                  disabled={Boolean(isOtherDriver && driverUser?.role !== "admin")}
+                >
+                  {amb.vehicle_number} ({amb.type.toUpperCase()})
+                  {amb.driver_id === driverUser?.id ? " ★ My Vehicle" : isOtherDriver ? " [Assigned]" : ""}
+                </option>
+              );
+            })}
           </select>
 
           {/* Online / Offline Pill Button */}
@@ -798,7 +858,7 @@ export default function DriverDashboardPage() {
         <div className="lg:col-span-5 flex flex-col gap-4">
           {/* STATE A: Incoming Emergency Dispatch (30-Sec Countdown Ring) */}
           {isAwaitingConfirmation && activeRequest && (
-            <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-b from-amber-950/80 to-slate-900 border-2 border-amber-500 space-y-5 shadow-2xl shadow-amber-500/20 animate-pulse-border">
+            <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-b from-amber-950/80 to-slate-900 border-2 border-amber-500 space-y-5 shadow-2xl shadow-amber-500/20">
               {/* Header with Circular Countdown */}
               <div className="flex items-center justify-between">
                 <div>
